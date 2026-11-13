@@ -24,7 +24,7 @@ The server prints a URL and a QR code. Scan the code with your phone or open the
 | Double-tap & hold, then drag | Click-and-drag |
 | Left / Middle / Right buttons | Press & hold mouse buttons |
 | ⌨︎ button | Type on the computer with the phone keyboard |
-| ⚙︎ button | Speed, acceleration, scroll speed, natural scrolling |
+| ⚙︎ button | Speed, acceleration, scroll speed, natural scrolling, scroll momentum |
 
 ## Options
 

@@ -9,6 +9,7 @@ import argparse
 import json
 import secrets
 import socket
+import sys
 from pathlib import Path
 
 from aiohttp import WSMsgType, web
@@ -43,6 +44,34 @@ class Controller:
         self.Button = Button
         self.Key = Key
         self.buttons = {"left": Button.left, "right": Button.right, "middle": Button.middle}
+        self._line_acc = [0.0, 0.0]  # leftover pixels when converting to line scrolls
+        self._quartz = None
+        if sys.platform == "darwin":
+            try:
+                import Quartz  # installed with pynput on macOS
+
+                self._quartz = Quartz
+            except ImportError:
+                pass
+
+    PIXELS_PER_LINE = 20
+
+    def scroll(self, dx: float, dy: float) -> None:
+        """Scroll by a pixel amount. +dy scrolls up, +dx scrolls right."""
+        if self._quartz is not None:
+            # Smooth, pixel-precise scrolling like a real Mac trackpad.
+            Q = self._quartz
+            ev = Q.CGEventCreateScrollWheelEvent(None, Q.kCGScrollEventUnitPixel, 2, int(dy), int(dx))
+            Q.CGEventPost(Q.kCGHIDEventTap, ev)
+            return
+        # Windows/Linux: only whole "lines", so carry over the remainder.
+        self._line_acc[0] += dx / self.PIXELS_PER_LINE
+        self._line_acc[1] += dy / self.PIXELS_PER_LINE
+        lx, ly = int(self._line_acc[0]), int(self._line_acc[1])
+        if lx or ly:
+            self._line_acc[0] -= lx
+            self._line_acc[1] -= ly
+            self.mouse.scroll(lx, ly)
 
     def handle(self, msg: dict) -> None:
         t = msg.get("t")
@@ -59,8 +88,8 @@ class Controller:
         elif t == "up":
             self.mouse.release(self.buttons.get(msg.get("b", "left"), self.Button.left))
         elif t == "scroll":
-            # pynput: +dy scrolls up, +dx scrolls right (direction is decided on the phone)
-            self.mouse.scroll(float(msg.get("dx", 0)), float(msg.get("dy", 0)))
+            # pixels; direction (natural or not) is decided on the phone
+            self.scroll(float(msg.get("dx", 0)), float(msg.get("dy", 0)))
         elif t == "text":
             self.keyboard.type(str(msg.get("s", "")))
         elif t == "key":

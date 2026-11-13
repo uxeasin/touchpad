@@ -40,8 +40,9 @@
 <div id="settings">
   <label>Speed <input id="speed" type="range" min="0.5" max="4" step="0.1"></label>
   <label>Acceleration <input id="accel" type="range" min="0" max="2" step="0.1"></label>
-  <label>Scroll speed <input id="scrollSpeed" type="range" min="0.2" max="3" step="0.1"></label>
+  <label>Scroll speed <input id="scrollSpeed" type="range" min="0.3" max="5" step="0.1"></label>
   <label>Natural scrolling <input id="natural" type="checkbox"></label>
+  <label>Scroll momentum <input id="momentum" type="checkbox"></label>
 </div>
 <div id="pad">
   <div id="scrollbar"></div>
@@ -57,7 +58,7 @@
 <script>
 (() => {
   // ---------- settings ----------
-  const defaults = { speed: 1.8, accel: 0.8, scrollSpeed: 1, natural: true };
+  const defaults = { speed: 1.8, accel: 0.8, scrollSpeed: 1.5, natural: true, momentum: true };
   let cfg = { ...defaults };
   try { Object.assign(cfg, JSON.parse(localStorage.getItem("tp-cfg") || "{}")); } catch {}
   const save = () => { try { localStorage.setItem("tp-cfg", JSON.stringify(cfg)); } catch {} };
@@ -95,18 +96,37 @@
   // ---------- gestures ----------
   const pad = document.getElementById("pad");
   const scrollbar = document.getElementById("scrollbar");
-  const TAP_MS = 220, TAP_MOVE = 10, SCROLL_STEP = 25; // px of finger travel per scroll "click"
+  const TAP_MS = 220, TAP_MOVE = 10;
   let touches = new Map();     // id -> {x, y}
   let start = null;            // gesture start info
   let maxFingers = 0, moved = false;
   let lastTapEnd = 0, dragging = false, tapTimer = null;
   let scrollMode = false;
+  let velX = 0, velY = 0, lastScrollT = 0, scrolled = false, momentumId = 0;
+
+  function stopMomentum() { if (momentumId) { cancelAnimationFrame(momentumId); momentumId = 0; } }
+  function startMomentum() {
+    // ignore if the fingers paused before lifting
+    if (!cfg.momentum || performance.now() - lastScrollT > 80) return;
+    if (Math.hypot(velX, velY) < 0.3) return;
+    let last = performance.now();
+    const step = (now) => {
+      const dt = Math.min(32, now - last); last = now;
+      accSX += velX * dt; accSY += velY * dt; flush();
+      const decay = Math.pow(0.995, dt); // ~ like a Mac trackpad glide
+      velX *= decay; velY *= decay;
+      momentumId = Math.hypot(velX, velY) > 0.02 ? requestAnimationFrame(step) : 0;
+    };
+    momentumId = requestAnimationFrame(step);
+  }
 
   pad.addEventListener("touchstart", (e) => {
     e.preventDefault();
     for (const t of e.changedTouches) touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+    stopMomentum(); // touching the pad stops a glide, like a real trackpad
     if (!start) {
       const t = e.changedTouches[0];
+      velX = velY = 0; scrolled = false;
       start = { time: performance.now(), x: t.clientX, y: t.clientY };
       moved = false; maxFingers = 0;
       scrollMode = t.target === scrollbar;
@@ -133,9 +153,13 @@
 
     if (touches.size >= 2 || scrollMode) {
       const dir = cfg.natural ? 1 : -1;
-      accSY += dir * dy * cfg.scrollSpeed / SCROLL_STEP;
-      accSX += -dir * dx * cfg.scrollSpeed / SCROLL_STEP;
-      if (scrollMode) accSX = 0;
+      // scroll in pixels (server turns them into smooth pixel or line scrolls)
+      const sy = dir * dy * cfg.scrollSpeed, sx = scrollMode ? 0 : -dir * dx * cfg.scrollSpeed;
+      accSY += sy; accSX += sx;
+      // track velocity (px per ms, smoothed) for momentum after lift-off
+      const now = performance.now(), dt = Math.max(1, now - lastScrollT);
+      velX = 0.8 * (sx / dt) + 0.2 * velX; velY = 0.8 * (sy / dt) + 0.2 * velY;
+      lastScrollT = now; scrolled = true;
     } else {
       const v = Math.hypot(dx, dy);
       const gain = cfg.speed * (1 + cfg.accel * Math.min(v, 30) / 10);
@@ -151,6 +175,7 @@
 
     const dur = performance.now() - start.time;
     const isTap = !moved && dur < TAP_MS;
+    if (scrolled) startMomentum();
     if (dragging) {
       dragging = false; send({ t: "up", b: "left" });
     } else if (isTap && maxFingers >= 3) {
