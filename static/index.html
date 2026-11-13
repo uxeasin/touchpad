@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#111">
+<title>Touchpad</title>
+<style>
+  :root { --bg:#111; --pad:#1c1c1e; --btn:#2c2c2e; --fg:#eee; --muted:#888; --accent:#0a84ff; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:15px system-ui, -apple-system, sans-serif; overscroll-behavior:none; touch-action:none;
+    user-select:none; -webkit-user-select:none; }
+  body { display:flex; flex-direction:column; padding:env(safe-area-inset-top) 10px env(safe-area-inset-bottom); gap:10px; }
+  header { display:flex; align-items:center; gap:8px; padding-top:10px; }
+  #status { width:10px; height:10px; border-radius:50%; background:#c33; flex:none; }
+  #status.on { background:#3c3; }
+  #statusText { color:var(--muted); flex:1; }
+  header button { background:var(--btn); color:var(--fg); border:0; border-radius:8px; padding:8px 12px; font:inherit; }
+  #pad { flex:1; background:var(--pad); border-radius:16px; position:relative; overflow:hidden; }
+  #pad .hint { position:absolute; inset:auto 0 12px; text-align:center; color:var(--muted); font-size:12px; pointer-events:none; }
+  #scrollbar { position:absolute; top:0; right:0; bottom:0; width:44px; border-left:1px dashed #333; }
+  .buttons { display:flex; gap:10px; height:70px; padding-bottom:10px; }
+  .buttons button { flex:1; background:var(--btn); color:var(--fg); border:0; border-radius:14px; font:inherit; }
+  .buttons button.active { background:var(--accent); }
+  #settings { display:none; flex-direction:column; gap:8px; background:var(--pad); padding:12px; border-radius:12px; }
+  #settings.open { display:flex; }
+  #settings label { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  #kbd { position:absolute; opacity:0; height:1px; width:1px; top:0; left:0; }
+</style>
+</head>
+<body>
+<header>
+  <span id="status"></span><span id="statusText">Connecting…</span>
+  <button id="kbdBtn">⌨︎</button>
+  <button id="setBtn">⚙︎</button>
+</header>
+<div id="settings">
+  <label>Speed <input id="speed" type="range" min="0.5" max="4" step="0.1"></label>
+  <label>Acceleration <input id="accel" type="range" min="0" max="2" step="0.1"></label>
+  <label>Scroll speed <input id="scrollSpeed" type="range" min="0.2" max="3" step="0.1"></label>
+  <label>Natural scrolling <input id="natural" type="checkbox"></label>
+</div>
+<div id="pad">
+  <div id="scrollbar"></div>
+  <div class="hint">1 finger: move · tap: click · 2-finger tap: right click · 2 fingers: scroll · double-tap &amp; hold: drag</div>
+</div>
+<div class="buttons">
+  <button id="lbtn">Left</button>
+  <button id="mbtn">Middle</button>
+  <button id="rbtn">Right</button>
+</div>
+<input id="kbd" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+
+<script>
+(() => {
+  // ---------- settings ----------
+  const defaults = { speed: 1.8, accel: 0.8, scrollSpeed: 1, natural: true };
+  let cfg = { ...defaults };
+  try { Object.assign(cfg, JSON.parse(localStorage.getItem("tp-cfg") || "{}")); } catch {}
+  const save = () => { try { localStorage.setItem("tp-cfg", JSON.stringify(cfg)); } catch {} };
+  for (const k of Object.keys(defaults)) {
+    const el = document.getElementById(k);
+    if (el.type === "checkbox") { el.checked = cfg[k]; el.onchange = () => { cfg[k] = el.checked; save(); }; }
+    else { el.value = cfg[k]; el.oninput = () => { cfg[k] = parseFloat(el.value); save(); }; }
+  }
+  document.getElementById("setBtn").onclick = () => document.getElementById("settings").classList.toggle("open");
+
+  // ---------- connection ----------
+  const token = new URLSearchParams(location.search).get("token") || "";
+  const statusDot = document.getElementById("status"), statusText = document.getElementById("statusText");
+  let ws;
+  function connect() {
+    ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+    ws.onopen = () => { statusDot.classList.add("on"); statusText.textContent = "Connected"; };
+    ws.onclose = () => { statusDot.classList.remove("on"); statusText.textContent = "Reconnecting…"; setTimeout(connect, 1000); };
+  }
+  connect();
+  const send = (m) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m)); };
+  const vibrate = (ms) => { try { navigator.vibrate && navigator.vibrate(ms); } catch {} };
+
+  // ---------- batched movement (one message per animation frame) ----------
+  let accX = 0, accY = 0, accSX = 0, accSY = 0, scheduled = false;
+  function flush() {
+    scheduled = false;
+    const mx = Math.trunc(accX), my = Math.trunc(accY);
+    if (mx || my) { send({ t: "move", dx: mx, dy: my }); accX -= mx; accY -= my; }
+    const sx = Math.trunc(accSX), sy = Math.trunc(accSY);
+    if (sx || sy) { send({ t: "scroll", dx: sx, dy: sy }); accSX -= sx; accSY -= sy; }
+  }
+  const schedule = () => { if (!scheduled) { scheduled = true; requestAnimationFrame(flush); } };
+
+  // ---------- gestures ----------
+  const pad = document.getElementById("pad");
+  const scrollbar = document.getElementById("scrollbar");
+  const TAP_MS = 220, TAP_MOVE = 10, SCROLL_STEP = 25; // px of finger travel per scroll "click"
+  let touches = new Map();     // id -> {x, y}
+  let start = null;            // gesture start info
+  let maxFingers = 0, moved = false;
+  let lastTapEnd = 0, dragging = false, tapTimer = null;
+  let scrollMode = false;
+
+  pad.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+    if (!start) {
+      const t = e.changedTouches[0];
+      start = { time: performance.now(), x: t.clientX, y: t.clientY };
+      moved = false; maxFingers = 0;
+      scrollMode = t.target === scrollbar;
+      // double-tap-and-hold => drag
+      if (performance.now() - lastTapEnd < 300 && tapTimer) {
+        clearTimeout(tapTimer); tapTimer = null;
+        dragging = true; send({ t: "down", b: "left" }); vibrate(15);
+      }
+    }
+    maxFingers = Math.max(maxFingers, touches.size);
+  }, { passive: false });
+
+  pad.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    let sumDx = 0, sumDy = 0, n = 0;
+    for (const t of e.changedTouches) {
+      const p = touches.get(t.identifier); if (!p) continue;
+      sumDx += t.clientX - p.x; sumDy += t.clientY - p.y; n++;
+      p.x = t.clientX; p.y = t.clientY;
+    }
+    if (!n) return;
+    const dx = sumDx / n, dy = sumDy / n;
+    if (start && Math.hypot(touches.values().next().value.x - start.x, touches.values().next().value.y - start.y) > TAP_MOVE) moved = true;
+
+    if (touches.size >= 2 || scrollMode) {
+      const dir = cfg.natural ? 1 : -1;
+      accSY += dir * dy * cfg.scrollSpeed / SCROLL_STEP;
+      accSX += -dir * dx * cfg.scrollSpeed / SCROLL_STEP;
+      if (scrollMode) accSX = 0;
+    } else {
+      const v = Math.hypot(dx, dy);
+      const gain = cfg.speed * (1 + cfg.accel * Math.min(v, 30) / 10);
+      accX += dx * gain; accY += dy * gain;
+    }
+    schedule();
+  }, { passive: false });
+
+  function end(e) {
+    e.preventDefault();
+    for (const t of e.changedTouches) touches.delete(t.identifier);
+    if (touches.size > 0 || !start) return;
+
+    const dur = performance.now() - start.time;
+    const isTap = !moved && dur < TAP_MS;
+    if (dragging) {
+      dragging = false; send({ t: "up", b: "left" });
+    } else if (isTap && maxFingers >= 3) {
+      send({ t: "click", b: "middle" }); vibrate(10);
+    } else if (isTap && maxFingers === 2) {
+      send({ t: "click", b: "right" }); vibrate(10);
+    } else if (isTap && maxFingers === 1 && !scrollMode) {
+      // delay slightly so a following touch can turn this into a drag
+      lastTapEnd = performance.now();
+      tapTimer = setTimeout(() => { tapTimer = null; send({ t: "click", b: "left" }); }, 180);
+      vibrate(5);
+    }
+    start = null;
+  }
+  pad.addEventListener("touchend", end, { passive: false });
+  pad.addEventListener("touchcancel", end, { passive: false });
+
+  // ---------- physical-style buttons (press & hold supported) ----------
+  for (const [id, b] of [["lbtn", "left"], ["mbtn", "middle"], ["rbtn", "right"]]) {
+    const el = document.getElementById(id);
+    el.addEventListener("touchstart", (e) => { e.preventDefault(); el.classList.add("active"); send({ t: "down", b }); vibrate(10); }, { passive: false });
+    const up = (e) => { e.preventDefault(); el.classList.remove("active"); send({ t: "up", b }); };
+    el.addEventListener("touchend", up, { passive: false });
+    el.addEventListener("touchcancel", up, { passive: false });
+  }
+
+  // ---------- keyboard ----------
+  const kbd = document.getElementById("kbd");
+  document.getElementById("kbdBtn").onclick = () => { kbd.value = ""; kbd.focus(); };
+  kbd.addEventListener("input", (e) => {
+    if (e.inputType === "deleteContentBackward") send({ t: "key", k: "backspace" });
+    else if (e.data) send({ t: "text", s: e.data });
+    kbd.value = " "; // keep a char so backspace always fires an input event
+  });
+  kbd.addEventListener("keydown", (e) => {
+    const map = { Enter: "enter", Backspace: "backspace", Tab: "tab", Escape: "esc" };
+    if (map[e.key] && !(e.key === "Backspace")) { e.preventDefault(); send({ t: "key", k: map[e.key] }); }
+  });
+})();
+</script>
+</body>
+</html>
