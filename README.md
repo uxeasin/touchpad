@@ -39,3 +39,7 @@ python server.py --dry-run                      # print events, don't move the m
 - **macOS:** allow your terminal under *System Settings → Privacy & Security → Accessibility*, or the mouse won't move.
 - **Linux:** needs an X11 session. On Wayland, pynput can't move the pointer.
 - **Firewall:** allow incoming connections on the port (default 8765) if the phone can't connect.
+
+## Also in this repo
+
+- [`netbond/`](netbond/README.md) lets a Mac use several routers / internet lines at once, with load balancing and automatic failover.
